@@ -42,6 +42,7 @@ import tempfile
 
 from absl import logging
 import numpy as np
+from six.moves import cPickle as pickle
 import tensorflow as tf
 
 from tensorflow_datasets.core import api_utils
@@ -57,7 +58,7 @@ from tensorflow_metadata.proto.v0 import statistics_pb2
 
 # Name of the file to output the DatasetInfo protobuf object.
 DATASET_INFO_FILENAME = "dataset_info.json"
-
+METADATA_FILENAME = "metadata.pkl"
 LICENSE_FILENAME = "LICENSE"
 
 INFO_STR = """tfds.core.DatasetInfo(
@@ -97,6 +98,7 @@ class DatasetInfo(object):
                supervised_keys=None,
                urls=None,
                citation=None,
+               metadata=None,
                redistribution_info=None):
     """Constructs DatasetInfo.
 
@@ -110,6 +112,9 @@ class DatasetInfo(object):
         supervised learning, if applicable for the dataset.
       urls: `list(str)`, optional, the homepage(s) for this dataset.
       citation: `str`, optional, the citation to use for this dataset.
+      metadata: Additonal python object which will be stored/restored with the
+        dataset. This allow to store any additional information with the
+        dataset. Object here must be pickable.
       redistribution_info: `dict`, optional, information needed for
         redistribution, as specified in `dataset_info_pb2.RedistributionInfo`.
         The content of the `license` subfield will automatically be written to a
@@ -134,6 +139,8 @@ class DatasetInfo(object):
       assert len(supervised_keys) == 2
       self._info_proto.supervised_keys.input = supervised_keys[0]
       self._info_proto.supervised_keys.output = supervised_keys[1]
+
+    self.metadata = metadata
 
     # Is this object initialized with both the static and the dynamic data?
     self._fully_initialized = False
@@ -236,11 +243,14 @@ class DatasetInfo(object):
     """Whether DatasetInfo has been fully initialized."""
     return self._fully_initialized
 
-  def _dataset_info_filename(self, dataset_info_dir):
+  def _dataset_info_path(self, dataset_info_dir):
     return os.path.join(dataset_info_dir, DATASET_INFO_FILENAME)
 
-  def _license_filename(self, dataset_info_dir):
+  def _license_path(self, dataset_info_dir):
     return os.path.join(dataset_info_dir, LICENSE_FILENAME)
+
+  def _metadata_path(self, dataset_info_dir):
+    return os.path.join(dataset_info_dir, METADATA_FILENAME)
 
   def compute_dynamic_properties(self):
     self._compute_dynamic_properties(self._builder)
@@ -287,13 +297,16 @@ class DatasetInfo(object):
     if self.features:
       self.features.save_metadata(dataset_info_dir)
 
+    # Save any additional metadata
+    if self.metadata is not None:
+      with tf.io.gfile.GFile(self._metadata_path(dataset_info_dir), "wb") as f:
+        pickle.dump(self.metadata, f)
+
     if self.redistribution_info.license:
-      with tf.io.gfile.GFile(self._license_filename(dataset_info_dir),
-                             "w") as f:
+      with tf.io.gfile.GFile(self._license_path(dataset_info_dir), "w") as f:
         f.write(self.redistribution_info.license)
 
-    with tf.io.gfile.GFile(self._dataset_info_filename(dataset_info_dir),
-                           "w") as f:
+    with tf.io.gfile.GFile(self._dataset_info_path(dataset_info_dir), "w") as f:
       f.write(self.as_json)
 
   def read_from_directory(self, dataset_info_dir):
@@ -312,7 +325,7 @@ class DatasetInfo(object):
       raise ValueError(
           "Calling read_from_directory with undefined dataset_info_dir.")
 
-    json_filename = self._dataset_info_filename(dataset_info_dir)
+    json_filename = self._dataset_info_path(dataset_info_dir)
 
     # Load the metadata from disk
     parsed_proto = read_from_json(json_filename)
@@ -323,6 +336,12 @@ class DatasetInfo(object):
     # Restore the feature metadata (vocabulary, labels names,...)
     if self.features:
       self.features.load_metadata(dataset_info_dir)
+
+    # Restore metadata if exists
+    metadata_path = self._metadata_path(dataset_info_dir)
+    if tf.io.gfile.exists(metadata_path):
+      with tf.io.gfile.GFile(metadata_path, "rb") as f:
+        self.metadata = pickle.load(f)
 
     # Update fields which are not defined in the code. This means that
     # the code will overwrite fields which are present in
